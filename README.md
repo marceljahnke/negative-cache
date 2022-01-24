@@ -1,5 +1,7 @@
 # Efficient Training of Retrieval Models using Negative Cache
 
+![Tests](https://github.com/marceljahnke/negative-cache/actions/workflows/lint-and-test.yml/badge.svg)
+
 This repository contains a PyTorch implementation of the paper [Efficient Training of Retrieval Models using Negative Cache](https://openreview.net/pdf?id=824xC-SgWgU). It's a training approach for a dual encoder, that uses a memory efficient negative streaming cache.
 
 The general idea, according to the authors, is to sample negatives from the cache and use them in combination with GumbelMax-sampling to approximate the cross-entropy loss function, at each iteration. By design the cache can store a large amount of negatives in a memory efficient way.
@@ -13,7 +15,6 @@ The original implementation can be found [here](https://github.com/google-resear
   - [Usage](#usage)
   - [Special cases](#special-cases)
   - [DistributedDataParallel usage](#distributeddataparallel-usage)
-  - [Examples](#examples)
 ---
 
 ## Installation
@@ -81,7 +82,7 @@ You can call the handler with an optional [`torch.utils.tensorboard.SummaryWrite
 
 ## Special cases
 
-If your document features consists of only one feature, pass them as a tuple containing only one item:
+If your document features consists of only one feature, pass it as a tuple containing only one item:
 ```python
 data_keys = ('document_feature_1',)
 ```
