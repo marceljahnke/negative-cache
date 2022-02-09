@@ -32,13 +32,13 @@ class AbstractRetrievalFn(torch.nn.Module, metaclass=abc.ABCMeta):
 
 class MaxScoreRetrievalFn(AbstractRetrievalFn):
     def __call__(self, scores):
-        indices = torch.argmax(scores, dim=1)
-        return torch.unsqueeze(indices, dim=1)
+        indices = torch.argmax(scores, dim=1).detach()
+        return torch.unsqueeze(indices, dim=1).detach()
 
 
 def _sample_gumbel(shape):
-    uniform_vals = torch.rand(shape)
-    gumbel_vals = -torch.log(-torch.log(uniform_vals))
+    uniform_vals = torch.rand(shape).detach()
+    gumbel_vals = -torch.log(-torch.log(uniform_vals)).detach()
     return gumbel_vals
 
 
@@ -60,7 +60,7 @@ class GumbelMaxRetrievalFn(AbstractRetrievalFn):
         gumbel_vals = _sample_gumbel(scores.size())
         # gumbel values of same shape as scores
         perturbed_scores = self.inv_temp * scores + gumbel_vals.to(device)
-        indices = torch.argmax(perturbed_scores, dim=1)
+        indices = torch.argmax(perturbed_scores, dim=1).detach()
         # indices: [batch_size] ==> indices of highest perturbed_score per batch
         # change shape for return to: [batch_size] --> [batch_size x 1]
-        return torch.unsqueeze(indices, dim=1)
+        return torch.unsqueeze(indices, dim=1).detach()

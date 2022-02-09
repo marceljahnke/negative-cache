@@ -43,15 +43,17 @@ class IsInCacheFilterFn(CacheFilterFn):
             new_items_vals = new_items[key]
             if cache_vals.dtype.is_floating_point:
                 raise NotImplementedError("Floating datatypes are not yet implemented.")
-            cache_vals = torch.unsqueeze(cache_vals, dim=0)
-            new_items_vals = torch.unsqueeze(new_items_vals, dim=1)
+            cache_vals = torch.unsqueeze(cache_vals, dim=0).detach()
+            new_items_vals = torch.unsqueeze(new_items_vals, dim=1).detach()
             elementwise = cache_vals == new_items_vals
+            elementwise = elementwise.detach()
             i = 2
             while i < elementwise.dim():
-                datawise = torch.all(elementwise, dim=-1)
+                datawise = torch.all(elementwise, dim=-1).detach()
                 i += 1
             datawise_matches.append(datawise)
-        all_keys_datawise = torch.stack(datawise_matches, dim=2)
-        all_keys_match = torch.all(all_keys_datawise, dim=2)
-        in_cache = torch.any(all_keys_match, dim=1)
+        all_keys_datawise = torch.stack(datawise_matches, dim=2).detach()
+        all_keys_match = torch.all(all_keys_datawise, dim=2).detach()
+        in_cache = torch.any(all_keys_match, dim=1).detach()
+        del datawise_matches
         return ~in_cache

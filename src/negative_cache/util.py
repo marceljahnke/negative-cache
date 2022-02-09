@@ -39,10 +39,10 @@ def approximate_top_k_with_indices(negative_scores, k):
     num_elem = negative_scores.size()[1]
     device = negative_scores.device
 
-    batch_indices = torch.arange(end=num_elem)
+    batch_indices = torch.arange(end=num_elem).detach()
     # batch_indices --> tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, ..., cache_size - 1])
     # torch.unsqueeze(batch_indices, dim=0) --> tensor([[0, 1, 2, 3, 4, 5, 6, 7, 8, ..., cache_size - 1]])
-    indices = torch.tile(torch.unsqueeze(batch_indices, dim=0), dims=(bs, 1))
+    indices = torch.tile(torch.unsqueeze(batch_indices, dim=0), dims=(bs, 1)).detach()
     # indices: tensor([
     #   [0, 1, 2, 3, 4, 5, 6, 7, 8, ..., cache_size - 1], <-- 0
     #   ...
@@ -52,10 +52,10 @@ def approximate_top_k_with_indices(negative_scores, k):
 
     # negative_scores: [batch_size x cache_size]
     # grouped_negative_scores: [batch_size * top_k x cache_size / k]
-    grouped_negative_scores = torch.reshape(negative_scores, (bs * k, -1))
+    grouped_negative_scores = torch.reshape(negative_scores, (bs * k, -1)).detach()
 
-    grouped_batch_indices = torch.arange(end=grouped_negative_scores.size()[0]).to(
-        device
+    grouped_batch_indices = (
+        torch.arange(end=grouped_negative_scores.size()[0]).to(device).detach()
     )
     # grouped_batch_indices: [0, 1, ..., batch_size * top_k - 1] --> size [batch_size * top_k]
     # with indices for rows in grouped_negative_scores
@@ -65,21 +65,23 @@ def approximate_top_k_with_indices(negative_scores, k):
     )
     # grouped_top_k_scores and grouped_top_k_indices: [batch_size * top_k x 1] each
 
-    grouped_top_k_indices = torch.squeeze(grouped_top_k_indices, dim=1)
+    grouped_top_k_indices = torch.squeeze(grouped_top_k_indices, dim=1).detach()
     # grouped_top_k_indices: [batch_size * top_k x 1] --> [batch_size * top_k]
 
-    gather_indices = torch.stack([grouped_batch_indices, grouped_top_k_indices], dim=1)
+    gather_indices = torch.stack(
+        [grouped_batch_indices, grouped_top_k_indices], dim=1
+    ).detach()
     # gather_indices: [batch_size * top_k x k=1]
 
-    grouped_indices = torch.reshape(indices, (bs * k, -1))
+    grouped_indices = torch.reshape(indices, (bs * k, -1)).detach()
     # grouped_indices: [batch_size * top_k x cache_size / top_k]
 
-    grouped_top_k_indices = gather_nd(grouped_indices, gather_indices)
+    grouped_top_k_indices = gather_nd(grouped_indices, gather_indices).detach()
     # grouped_top_k_indices: [top_k * batch_size] ==> indices for top1 of each grouped_negative_scores
     # for all batches converted to original indices of negative_scores
 
-    top_k_indices = torch.reshape(grouped_top_k_indices, (bs, k))
-    top_k_scores = torch.reshape(grouped_top_k_scores, (bs, k))
+    top_k_indices = torch.reshape(grouped_top_k_indices, (bs, k)).detach()
+    top_k_scores = torch.reshape(grouped_top_k_scores, (bs, k)).detach()
     # top_k_indices, top_k_scores: [batch_size x top_k] each
     # containing the indices of the top_k scores (from the cache between current query emb and cache emb);
     # each row contains values for a query (number of rows == batch_size)
@@ -92,10 +94,12 @@ def approximate_top_k_with_indices(negative_scores, k):
 def cross_replica_concat(tensor: torch.Tensor, group=None):
     with torch.cuda.device(dist.get_rank()):
         tensor_list = [
-            torch.empty_like(tensor).cuda() for _ in range(dist.get_world_size())
+            torch.empty_like(tensor).cuda().detach()
+            for _ in range(dist.get_world_size())
         ]
         dist.all_gather(tensor_list, tensor.contiguous(), group)
         tensor_concat = torch.concat(tensor_list).cuda()
+        del tensor_list
     return tensor_concat
 
 
@@ -111,6 +115,7 @@ def gather_nd(params, indices):
 
     assert len(indices.size()) == 2
     assert len(params_size) >= indices.size(1)
+    del params_size
 
     # Generate indices
     indices = indices.t().long()
@@ -174,5 +179,5 @@ def tensor_update(
             update = torch.cat([update, pad])
 
         tensor[idx] = update.to(tensor.device)
-
+    del update
     return tensor

@@ -51,10 +51,10 @@ class CacheManager(object):
     def init_cache(self):
         """Creates a zero-initialized cache using the specs."""
         data = {
-            k: torch.zeros([self.cache_size] + spec.shape, dtype=spec.dtype)
+            k: torch.zeros([self.cache_size] + spec.shape, dtype=spec.dtype).detach()
             for k, spec in self.specs.items()
         }
-        age = torch.zeros([self.cache_size], dtype=torch.int32)
+        age = torch.zeros([self.cache_size], dtype=torch.int32).detach()
         out = NegativeCache(data=data, age=age)
         return out
 
@@ -64,30 +64,36 @@ class CacheManager(object):
         _, new_item_indices = torch.topk(
             age, num_updates
         )  # no rules for indices of duplicate values -> does not return the lowest indeces of duplicates like tf.math.top_k
+        del any_update
+        del num_updates
         if mask is not None:
             mask = mask.type(torch.int32)
             unmasked_indices = (torch.cumsum(mask, dim=0) - 1) * mask
-            unmasked_indices = torch.unsqueeze(unmasked_indices, dim=1)
-            new_item_indices = util.gather_nd(new_item_indices, unmasked_indices)
+            unmasked_indices = torch.unsqueeze(unmasked_indices, dim=1).detach()
+            new_item_indices = util.gather_nd(
+                new_item_indices, unmasked_indices
+            ).detach()
         return new_item_indices
 
     def _update_indices(self, data, updates, indices, mask=None):
-        indices = torch.unsqueeze(indices, dim=1)
+        indices = torch.unsqueeze(indices, dim=1).detach()
         updated_data = {}
         for k in self.specs.keys():
             if k in updates:
                 updated_data[k] = _masked_tensor_scatter_nd_update(
                     data[k], indices, updates[k], mask, padding=True
-                )
+                ).detach()
             else:
-                updated_data[k] = data[k]
+                updated_data[k] = data[k].detach()
         return updated_data
 
     def _set_age(self, age, indices, value, mask=None):
-        indices = torch.unsqueeze(indices, dim=1)
+        indices = torch.unsqueeze(indices, dim=1).detach()
         num_updates = indices.size()[0]
-        values = value * torch.ones([num_updates], dtype=torch.int32)
-        updated_age = _masked_tensor_scatter_nd_update(age, indices, values, mask)
+        values = value * torch.ones([num_updates], dtype=torch.int32).detach()
+        updated_age = _masked_tensor_scatter_nd_update(
+            age, indices, values, mask
+        ).detach()
         return updated_age
 
     def update_cache(
@@ -176,10 +182,17 @@ class CacheManager(object):
 
 def _get_broadcastable_mask(mask, target):
     mask_shape = torch.concat(
-        [torch.tensor(mask.size()), torch.ones(target.dim() - 1, dtype=torch.int32)],
+        [
+            torch.tensor(mask.size()).detach(),
+            torch.ones(target.dim() - 1, dtype=torch.int32).detach(),
+        ],
         dim=0,
     )
-    return torch.reshape(mask, tuple(mask_shape)).type(target.dtype)
+    broadcastable_mask = (
+        torch.reshape(mask, tuple(mask_shape)).type(target.dtype).detach()
+    )
+    del mask_shape
+    return broadcastable_mask
 
 
 def _masked_tensor_scatter_nd_update(
@@ -191,15 +204,15 @@ def _masked_tensor_scatter_nd_update(
     # We have to handle two cases: (1) all updates are masked and (2) there is
     # at least one update not masked. We do not want to unnessesarily recreate the
     # cache and to support TPU we cannot use condtional statements.
-    pred = torch.any(mask.type(torch.bool))
+    pred = torch.any(mask.type(torch.bool)).detach()
     pred_indices = pred.type(indices.dtype)
     pred_updates = pred.type(updates.dtype)
-    indices_mask = torch.unsqueeze(mask.type(indices.dtype), dim=1)
+    indices_mask = torch.unsqueeze(mask.type(indices.dtype), dim=1).detach()
     updates_mask = _get_broadcastable_mask(mask, updates)
     # If there is at least one unmasked element we will get it here. We will
     # replace all masked indices and updates with this element.
     _, not_masked = torch.topk(indices_mask[:, 0], k=1)
-    not_masked = not_masked[0]
+    not_masked = not_masked[0].detach()
     indices = indices * indices_mask + indices[not_masked] * (1 - indices_mask)
     updates = updates * updates_mask + updates[not_masked] * (1 - updates_mask)
     # If all elements are masked, then indices will become all zero and we

@@ -86,14 +86,14 @@ def _retrieve_from_caches(
     # all_embeddings: Tensor with all embeddings as rows
     all_embeddings = _batch_concat_with_no_op(
         [cache[data_source].data[embedding_key] for data_source in sorted_data_sources]
-    )
+    ).detach()
     all_data = {}
     # all_data: dict with same keys as specs (without embeddings) and Tensors as valules.
     # Tensors have all features from specs as rows.
     for key in data_keys:
         all_data[key] = _batch_concat_with_no_op(
             [cache[data_source].data[key] for data_source in sorted_data_sources]
-        )
+        ).detach()
     # scores: query embedding from current batch * all_embeddings from cache -->
     # scores for all queries from batch and document embedding from cache
 
@@ -104,11 +104,14 @@ def _retrieve_from_caches(
         all_embeddings,
         score_transform=score_transform,
         all_pairs=True,
-    )
+    ).detach()
     if top_k:
         scores, top_k_indices = util.approximate_top_k_with_indices(scores, top_k)
         # scores, top_k_indices: [batch_size x top_k]
-        top_k_indices = top_k_indices.type(torch.int64).to(device)
+        top_k_indices = top_k_indices.type(torch.int64).to(device).detach()
+        scores = (
+            scores.detach()
+        )  # scores are only used to identify the current 'best' negative documents in the cache
 
         retrieved_indices = retrieval_fn(scores)
         # ONE index for each query! extracted from the top_k for each query
@@ -116,34 +119,41 @@ def _retrieve_from_caches(
         # gumbel value (and inv_temp) for each query out of top_k values
         # retrieved_indices: [batch_size x 1]
 
-        batch_index = torch.unsqueeze(
-            torch.arange(end=retrieved_indices.size()[0], dtype=torch.int64), dim=1
-        ).to(device)
+        batch_index = (
+            torch.unsqueeze(
+                torch.arange(end=retrieved_indices.size()[0], dtype=torch.int64), dim=1
+            )
+            .detach()
+            .to(device)
+        )
         # batch_index: [batch_size x 1]
-        retrieved_indices_with_batch_index = torch.concat(
-            [batch_index, retrieved_indices], dim=1
-        ).to(device)
+        retrieved_indices_with_batch_index = (
+            torch.concat([batch_index, retrieved_indices], dim=1).to(device).detach()
+        )
         # retrieved_indices_with_batch_index: [batch_size x 1 + 1] == [batch_size x 2]
 
         retrieved_indices = util.gather_nd(
             top_k_indices, retrieved_indices_with_batch_index
-        )
+        ).detach()
         # retrieved_indices: [batch_size] == converted through retrieval function (GumbelMax) retrieved
         # indices into original indice for the cache
-        retrieved_indices = torch.unsqueeze(retrieved_indices, dim=1)
+        retrieved_indices = torch.unsqueeze(retrieved_indices, dim=1).detach()
         # change from 1D to 2D: [batch_size] --> [batch_size x 1]
     else:
         retrieved_indices = retrieval_fn(scores)
     retrieved_indices = retrieved_indices.detach()
     retrieved_data = {
-        k: util.gather_nd(v.to(device), retrieved_indices) for k, v in all_data.items()
+        k: util.gather_nd(v.to(device).detach(), retrieved_indices).detach()
+        for k, v in all_data.items()
     }
     # retrieved_data contains Tensors with values (specified in specs without embedding == data_keys)
     # the tensor data is the data for the value which index was retrieved via the retrieval
     # function (the gumbel max retrieval fn)
     # each row in the tensor is for one query, since each query got one index retrieved
 
-    retrieved_cache_embeddings = util.gather_nd(all_embeddings, retrieved_indices)
+    retrieved_cache_embeddings = util.gather_nd(
+        all_embeddings, retrieved_indices
+    ).detach()
     # retrieved_cache_embeddings: same as retrieved_data but not as a dict. Contains the embeddings of
     # the documents which scores had the highest gumbel max (with gaumbel value and inv_temp)
     return _RetrievalReturn(
@@ -155,7 +165,7 @@ def _get_data_sorce_start_position_and_cache_sizes(
     cache, embedding_key, sorted_data_sources
 ):
     """Gets the first index and size per data sources in the concatenated data."""
-    curr_position = torch.tensor(0, dtype=torch.int64)
+    curr_position = torch.tensor(0, dtype=torch.int64).detach()
     start_positions = {}
     cache_sizes = {}
     for data_source in sorted_data_sources:
@@ -189,23 +199,25 @@ def _get_retrieved_embedding_updates(
         )
         updated_item_indices[data_source] = torch.squeeze(
             updated_item_indices[data_source], dim=1
-        )
+        ).detach()
         updated_item_mask[data_source] = torch.squeeze(
             updated_item_mask[data_source], dim=1
-        )
+        ).detach()
 
     # updated_item_data: dict with new embeddings as data
     # updated_item_indices: indices of new data on each cache
     # updated_item_mask: contains information whether the new data should be updated
     # into the respectiv cache
+    del start_positions
+    del cache_sizes
     return updated_item_data, updated_item_indices, updated_item_mask
 
 
 def _get_staleness(cache_embeddings, updated_embeddings):
     error = cache_embeddings - updated_embeddings
-    mse = torch.sum(error ** 2, dim=1)
-    normalized_mse = mse / torch.sum(updated_embeddings ** 2, dim=1)
-    return normalized_mse
+    mse = torch.sum(error ** 2, dim=1).detach()
+    normalized_mse = mse / torch.sum(updated_embeddings ** 2, dim=1).detach()
+    return normalized_mse.detach()
 
 
 _LossCalculationReturn = collections.namedtuple(
@@ -247,23 +259,8 @@ class AbstractCacheClassificationLoss(CacheLoss, metaclass=abc.ABCMeta):
         """Calculates the cache classification loss and associated summaries."""
         positive_scores = self._score_documents(query_embeddings, pos_doc_embeddings)
         retrieval_return = self._retrieve_from_cache(query_embeddings, cache)
-        # retrieval_return is a _RetrievalReturn object, it contains:
-        #   retrieved_data: Dict with same keys as data_keys (keys in specs dict without 'embedding';
-        #       the document_feature_n in the official documentation).
-        #       The values are Tensors, with number of rows in those tensors == batch_size == query_embeddings.
-        #       The tensors contain the data specified in the specs.
-        #   scores: [batch_size x top_k] top_k scores for each query embedding (approximated)
-        #   retrieved_indices: [batch_size x 1] one index retrieved by the retrieval function from
-        #       the cache (=> GumbelMaxRetrieval, based on the pertubed score; used only top_k scores (approximated))
-        #       per query embedding. Each index specifies an item in the cache.
-        #   retrieved_cache_embeddings: Tensor of size [batch_size x embedding_size]; contains the embeddings of the
-        #       documents at the indices which were retrived by the retrieval function (GumbelMax)
 
         retrieved_negative_embeddings = doc_network(retrieval_return.retrieved_data)
-        # retrieved_negative_embeddings:
-        #   [batch_size == query_embeddings x embedding size of network == CLS token embedding length == 768]
-        # document network is the embedding function of the model for the document / passages
-        # therefor it needs the input_ids and corresponding attention_masks
 
         retrieved_negative_scores = self._score_documents(
             query_embeddings, retrieved_negative_embeddings
@@ -272,7 +269,7 @@ class AbstractCacheClassificationLoss(CacheLoss, metaclass=abc.ABCMeta):
         # one score for each query b'cos only one document retrieved per query
 
         cache_and_pos_scores = torch.concat(
-            [torch.unsqueeze(positive_scores, dim=1), retrieval_return.scores], dim=1
+            [torch.unsqueeze(positive_scores, dim=1), retrieval_return.scores,], dim=1,
         )
         # score of query and positive document embedding from current batch are concatenated with the
         # approximated top_k scores from the cache
@@ -281,14 +278,15 @@ class AbstractCacheClassificationLoss(CacheLoss, metaclass=abc.ABCMeta):
         prob_pos = F.softmax(cache_and_pos_scores, dim=1)[:, 0]
         prob_pos = prob_pos.detach()
         training_loss = (1.0 - prob_pos) * (retrieved_negative_scores - positive_scores)
-        interpretable_loss = -torch.log(prob_pos)
+        interpretable_loss = -torch.log(prob_pos).detach()
         staleness = _get_staleness(
             retrieval_return.retrieved_cache_embeddings, retrieved_negative_embeddings
-        )
+        ).detach()
         if reducer is not None:
             training_loss = reducer(training_loss)
             interpretable_loss = reducer(interpretable_loss)
             staleness = reducer(staleness)
+        retrieved_negative_embeddings = retrieved_negative_embeddings.detach()
         return _LossCalculationReturn(
             training_loss=training_loss,
             interpretable_loss=interpretable_loss,
@@ -393,12 +391,6 @@ class CacheClassificationLoss(AbstractCacheClassificationLoss):
             doc_network, query_embeddings, pos_doc_embeddings, cache, self.reducer
         )
 
-        # loss_calculation_return is a _LossCalculationReturn object, a namedTuple. It contains, among other:
-        #    retrieved_negative_embeddings:
-        #       [batch_size == query_embeddings x embedding size of network == CLS token embedding length == 768]
-        #       One embedding per query, computed by using the data of the GumbelMax retrieved documents and the
-        #       document_network
-
         training_loss = loss_calculation_return.training_loss
         interpretable_loss = loss_calculation_return.interpretable_loss
         staleness = loss_calculation_return.staleness
@@ -407,7 +399,7 @@ class CacheClassificationLoss(AbstractCacheClassificationLoss):
         # one gumbel max retrieved item from the cache, per query.
         # Size = [batch_size x doc_network embedding size == CLS token embedding for BERT == 768] --> [batch_size x 768]
         retrieved_negative_embeddings = (
-            loss_calculation_return.retrieved_negative_embeddings
+            loss_calculation_return.retrieved_negative_embeddings.detach()
         )
 
         sorted_data_sources = sorted(cache.keys())

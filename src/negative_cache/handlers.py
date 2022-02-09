@@ -94,6 +94,11 @@ class _MultiCacheLossHandler(torch.nn.Module):
                 updated_item_indices=updated_item_indices,
                 updated_item_mask=updated_item_mask,
             )
+            del new_items
+            del updated_item_data
+            del updated_item_indices
+            del updated_item_mask
+
             # new_cache contains the updates
             # next: replace old cache with new one
             for data_key, variable in self.cache[cache_key].data.items():
@@ -103,6 +108,7 @@ class _MultiCacheLossHandler(torch.nn.Module):
             assert self.cache[cache_key].age.size() == new_cache.age.size()
             assert self.cache[cache_key].age.dtype == new_cache.age.dtype
             self.cache[cache_key].age.data = new_cache.age.data
+            del new_cache
 
     def update_cache_and_compute_loss(
         self,
