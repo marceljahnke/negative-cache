@@ -66,9 +66,9 @@ def _score_documents(
 def _batch_concat_with_no_op(tensors):
     """If there is only one tensor to concatenate, this is a no-op."""
     if len(tensors) == 1:
-        return tensors[0]
+        return tensors[0].detach()
     else:
-        return torch.concat(tensors, dim=0)
+        return torch.concat(tensors, dim=0).detach()
 
 
 def _retrieve_from_caches(
@@ -108,12 +108,13 @@ def _retrieve_from_caches(
     if top_k:
         scores, top_k_indices = util.approximate_top_k_with_indices(scores, top_k)
         # scores, top_k_indices: [batch_size x top_k]
-        top_k_indices = top_k_indices.type(torch.int64).to(device).detach()
+        top_k_indices = top_k_indices.type(torch.int64).detach().to(device)
         scores = (
             scores.detach()
         )  # scores are only used to identify the current 'best' negative documents in the cache
 
         retrieved_indices = retrieval_fn(scores)
+        retrieved_indices = retrieved_indices.detach()
         # ONE index for each query! extracted from the top_k for each query
         # retrieved_indices contains index of highest score in cache after modification with
         # gumbel value (and inv_temp) for each query out of top_k values
@@ -121,14 +122,17 @@ def _retrieve_from_caches(
 
         batch_index = (
             torch.unsqueeze(
-                torch.arange(end=retrieved_indices.size()[0], dtype=torch.int64), dim=1
+                torch.arange(
+                    end=retrieved_indices.size()[0], dtype=torch.int64
+                ).detach(),
+                dim=1,
             )
             .detach()
             .to(device)
         )
         # batch_index: [batch_size x 1]
         retrieved_indices_with_batch_index = (
-            torch.concat([batch_index, retrieved_indices], dim=1).to(device).detach()
+            torch.concat([batch_index, retrieved_indices], dim=1).detach().to(device)
         )
         # retrieved_indices_with_batch_index: [batch_size x 1 + 1] == [batch_size x 2]
 
@@ -141,9 +145,9 @@ def _retrieve_from_caches(
         # change from 1D to 2D: [batch_size] --> [batch_size x 1]
     else:
         retrieved_indices = retrieval_fn(scores)
-    retrieved_indices = retrieved_indices.detach()
+        retrieved_indices = retrieved_indices.detach()
     retrieved_data = {
-        k: util.gather_nd(v.to(device).detach(), retrieved_indices).detach()
+        k: util.gather_nd(v.detach().to(device), retrieved_indices).detach()
         for k, v in all_data.items()
     }
     # retrieved_data contains Tensors with values (specified in specs without embedding == data_keys)
@@ -156,6 +160,7 @@ def _retrieve_from_caches(
     ).detach()
     # retrieved_cache_embeddings: same as retrieved_data but not as a dict. Contains the embeddings of
     # the documents which scores had the highest gumbel max (with gaumbel value and inv_temp)
+    del all_data
     return _RetrievalReturn(
         retrieved_data, scores, retrieved_indices, retrieved_cache_embeddings
     )
@@ -427,17 +432,19 @@ class CacheClassificationLoss(AbstractCacheClassificationLoss):
 
 
 def _get_local_elements_global_data(all_elements_local_data, num_replicas):
-    all_elements_local_data = torch.unsqueeze(all_elements_local_data, dim=1)
+    all_elements_local_data = torch.unsqueeze(all_elements_local_data, dim=1).detach()
     list_of_tensors = list(
         torch.tensor_split(input=all_elements_local_data, sections=num_replicas, dim=0)
     )
     gathered_tensor_list = [
-        torch.empty_like(list_of_tensors[0]) for _ in range(num_replicas)
+        torch.empty_like(list_of_tensors[0]).detach() for _ in range(num_replicas)
     ]
     dist.all_to_all(
         output_tensor_list=gathered_tensor_list, input_tensor_list=list_of_tensors
     )
-    concat = torch.concat(gathered_tensor_list, dim=1)
+    concat = torch.concat(gathered_tensor_list, dim=1).detach()
+    del list_of_tensors
+    del gathered_tensor_list
     return concat
 
 
@@ -495,7 +502,9 @@ class DistributedCacheClassificationLoss(AbstractCacheClassificationLoss):
         )
 
         # We transfer all queries to all replica and retrieve from every shard.
-        all_queries_local_weight = torch.logsumexp(retrieval_return.scores, dim=1)
+        all_queries_local_weight = torch.logsumexp(
+            retrieval_return.scores, dim=1
+        ).detach()
         local_queries_global_weights = _get_local_elements_global_data(
             all_queries_local_weight, num_replicas
         )
@@ -507,25 +516,30 @@ class DistributedCacheClassificationLoss(AbstractCacheClassificationLoss):
         local_queries_all_retrieved_embeddings = _get_local_elements_global_data(
             retrieval_return.retrieved_cache_embeddings, num_replicas
         )
+        del retrieval_return
         # We then sample a shard index proportional to its total weight.
         # This allows us to do Gumbel-Max sampling without modifying APIs.
         selected_replica = self._retrieval_fn(local_queries_global_weights)
         selected_replica = selected_replica.detach()
         num_elements = selected_replica.size()[0]
         with torch.cuda.device(dist.get_rank()):
-            batch_indices = torch.arange(end=num_elements).cuda()
+            batch_indices = torch.arange(end=num_elements).detach().cuda()
             batch_indices = batch_indices.type(torch.int64)
-            batch_indices = torch.unsqueeze(batch_indices, dim=1)
-            selected_replica_with_batch = torch.concat(
-                [batch_indices, selected_replica], dim=1
-            ).cuda()
+            batch_indices = torch.unsqueeze(batch_indices, dim=1).detach()
+            selected_replica_with_batch = (
+                torch.concat([batch_indices, selected_replica], dim=1).detach().cuda()
+            )
         retrieved_data = {
-            k: util.gather_nd(v, selected_replica_with_batch)
+            k: util.gather_nd(v, selected_replica_with_batch).detach()
             for k, v in local_queries_all_retrieved_data.items()
         }
         retrieved_cache_embeddings = util.gather_nd(
             local_queries_all_retrieved_embeddings, selected_replica_with_batch
-        )
+        ).detach()
+        del all_queries_local_weight
+        del local_queries_all_retrieved_data
+        del local_queries_all_retrieved_embeddings
+        del selected_replica_with_batch
         return _RetrievalReturn(
             retrieved_data=retrieved_data,
             scores=local_queries_global_weights,
@@ -540,6 +554,7 @@ class DistributedCacheClassificationLoss(AbstractCacheClassificationLoss):
         training_loss = loss_calculation_return.training_loss
         interpretable_loss = loss_calculation_return.interpretable_loss
         staleness = loss_calculation_return.staleness
+        del loss_calculation_return
         return CacheLossReturn(
             training_loss=training_loss,
             interpretable_loss=interpretable_loss,

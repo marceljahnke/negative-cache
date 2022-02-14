@@ -94,11 +94,11 @@ def approximate_top_k_with_indices(negative_scores, k):
 def cross_replica_concat(tensor: torch.Tensor, group=None):
     with torch.cuda.device(dist.get_rank()):
         tensor_list = [
-            torch.empty_like(tensor).cuda().detach()
+            torch.empty_like(tensor).detach().cuda()
             for _ in range(dist.get_world_size())
         ]
         dist.all_gather(tensor_list, tensor.contiguous(), group)
-        tensor_concat = torch.concat(tensor_list).cuda()
+        tensor_concat = torch.concat(tensor_list).detach().cuda()
         del tensor_list
     return tensor_concat
 
@@ -120,14 +120,16 @@ def gather_nd(params, indices):
     # Generate indices
     indices = indices.t().long()
     ndim = indices.size(0)
-    idx = torch.zeros_like(indices[0]).long()
+    idx = torch.zeros_like(indices[0]).detach().long()
     m = 1
 
     for i in range(ndim)[::-1]:
         idx += indices[i] * m
         m *= params.size(i)
 
-    params = params.reshape((-1, *tuple(torch.tensor(params.size()[ndim:]))))
+    params = params.reshape(
+        (-1, *tuple(torch.tensor(params.size()[ndim:]).detach()))
+    ).detach()
     return params[idx]
 
 
@@ -173,10 +175,10 @@ def tensor_update(
 
         if padding and slice_update:
             diff = len(tensor[0]) - len(update)
-            pad = padding_token * torch.ones(size=[diff], dtype=update.dtype).to(
-                updates.device
-            )
-            update = torch.cat([update, pad])
+            pad = padding_token * torch.ones(
+                size=[diff], dtype=update.dtype
+            ).detach().to(updates.device)
+            update = torch.cat([update, pad]).detach()
 
         tensor[idx] = update.to(tensor.device)
     del update

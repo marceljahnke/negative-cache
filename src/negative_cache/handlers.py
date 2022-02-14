@@ -104,10 +104,10 @@ class _MultiCacheLossHandler(torch.nn.Module):
             for data_key, variable in self.cache[cache_key].data.items():
                 assert variable.size() == new_cache.data[data_key].size()
                 assert variable.dtype == new_cache.data[data_key].dtype
-                variable = new_cache.data[data_key]
+                variable = new_cache.data[data_key].detach()
             assert self.cache[cache_key].age.size() == new_cache.age.size()
             assert self.cache[cache_key].age.dtype == new_cache.age.dtype
-            self.cache[cache_key].age.data = new_cache.age.data
+            self.cache[cache_key].age.data = new_cache.age.data.detach()
             del new_cache
 
     def update_cache_and_compute_loss(
