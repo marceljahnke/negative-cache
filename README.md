@@ -10,7 +10,6 @@ The original implementation can be found [here](https://github.com/google-resear
 
 
 ---
-- [Efficient Training of Retrieval Models using Negative Cache](#efficient-training-of-retrieval-models-using-negative-cache)
   - [Installation](#installation)
   - [Usage](#usage)
   - [Special cases](#special-cases)
@@ -40,26 +39,32 @@ The generel usage is very similair to the tensorflow version. This chapter expla
 Set up the specs that describe the document feature dictionary. These describe the feature keys and shapes for the items we need to cache. The document features represent the features that are used to compute the embedding by using the `document_network`.
 
 ```python
+from negative_cache.negative_cache import CacheManager, FixedLenFeature
+from negative_cache.handlers import CacheLossHandler
+from negative_cache.losses import CacheClassificationLoss, DistributedCacheClassificationLoss
+```
+
+```python
 data_keys = ('document_feature_1', 'document_feature_2')
 embedding_key = 'embedding'
 specs = {
-    'document_feature_1': tf.io.FixedLenFeature([document_feature_1_size], tf.int32),
-    'document_feature_2': tf.io.FixedLenFeature([document_feature_2_size], tf.int32),
-    'embedding': tf.io.FixedLenFeature([embedding_size], tf.float32)
+    'document_feature_1': FixedLenFeature(shape=[document_feature_1_size], dtype=torch.int32),
+    'document_feature_2': FixedLenFeature(shape=[document_feature_2_size], dtype=torch.int32),
+    'embedding': FixedLenFeature(shape=[embedding_size], dtype=torch.float32)
 }
 ```
 
 Set up the cache loss.
 
 ```python
-cache_manager = negative_cache.CacheManager(specs, cache_size=131072)
-cache_loss = losses.CacheClassificationLoss(
+cache_manager = CacheManager(specs, cache_size=131072)
+cache_loss = CacheClassificationLoss(
     embedding_key=embedding_key,
     data_keys=data_keys,
     score_transform=lambda score: 20.0 * score,  # Optional, applied to scores before loss.
     top_k=64  # Optional, restricts returned elements to the top_k highest scores.
 )
-handler = handlers.CacheLossHandler(
+handler = CacheLossHandler(
     cache_manager, cache_loss, embedding_key=embedding_key, data_keys=data_keys)
 ```
 
@@ -77,7 +82,7 @@ loss = handler.update_cache_and_compute_loss(
     )
 ```
 
-You can call the handler with an optional [`torch.utils.tensorboard.SummaryWriter`](https://pytorch.org/docs/stable/tensorboard.html#torch.utils.tensorboard.writer.SummaryWriter) to log additional information, i.e. interpretable loss and staleness of the cache.
+You can call the handler with an optional Tuple `writer = `([`torch.utils.tensorboard.SummaryWriter`](https://pytorch.org/docs/stable/tensorboard.html#torch.utils.tensorboard.writer.SummaryWriter), global_step) to log additional information, i.e. interpretable loss and staleness of the cache.
 
 
 ## Special cases
