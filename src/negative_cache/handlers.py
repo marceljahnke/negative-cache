@@ -126,11 +126,14 @@ class _MultiCacheLossHandler(torch.nn.Module):
             cache=self.cache,
         )
         if writer is not None:
-            writer.add_scalar(
+            writer[0].add_scalar(
                 "cache/interpretable_prediction_loss",
                 cache_loss_return.interpretable_loss,
+                writer[1],
             )
-            writer.add_scalar("cache/staleness", cache_loss_return.staleness)
+            writer[0].add_scalar(
+                "cache/staleness", cache_loss_return.staleness, writer[1]
+            )
         self._update_cache(new_item_embeddings, new_item_features, cache_loss_return)
         return cache_loss_return.training_loss
 
@@ -196,7 +199,7 @@ class CacheLossHandler(torch.nn.Module):
             positive for the queries.
           features: The features needed to generate the embeddings of the positive
             items.
-          writer: SummaryWriter used for logging of additional information, i.e.
+          writer: Tuple with SummaryWriter and global_step used for logging of additional information, i.e.
             interpretable loss and staleness of the cache.
 
         Returns:
