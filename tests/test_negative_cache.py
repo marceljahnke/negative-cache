@@ -69,7 +69,6 @@ class NegativeCacheTest(unittest.TestCase):
         cache = cache_manager.update_cache(cache, new_items=updates)
 
         self.assertEqual({"1", "2"}, set(cache.data.keys()))
-        print(cache.data["1"])
         self.assertTrue(
             torch.equal(
                 torch.tensor([[0, 0], [0, 0], [1, 1], [1, 1]], dtype=torch.int32),

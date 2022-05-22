@@ -31,7 +31,9 @@ class StubCacheLoss(object):
         self.updated_item_indices = updated_item_indices
         self.updated_item_mask = updated_item_mask
 
-    def __call__(self, doc_network, query_embeddings, pos_doc_embeddings, cache):
+    def __call__(
+        self, doc_network, query_embeddings, pos_doc_embeddings, cache, **args
+    ):
         return losses.CacheLossReturn(
             training_loss=0.0,
             interpretable_loss=0.0,
@@ -39,6 +41,7 @@ class StubCacheLoss(object):
             updated_item_indices=self.updated_item_indices,
             updated_item_mask=self.updated_item_mask,
             staleness=0.0,
+            topk_features=None,
         )
 
 

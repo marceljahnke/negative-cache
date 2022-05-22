@@ -117,7 +117,7 @@ class _MultiCacheLossHandler(torch.nn.Module):
         pos_item_embeddings,
         new_item_embeddings,
         new_item_features,
-        return_topk,
+        return_topk=0,
         writer=None,
     ):
         cache_loss_return = self.cache_loss(

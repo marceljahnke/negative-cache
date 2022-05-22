@@ -87,7 +87,7 @@ def _retrieve_from_caches(
     embedding_key,
     data_keys,
     sorted_data_sources,
-    return_topk,
+    return_topk=0,
     score_transform=None,
     top_k=None,
 ):
@@ -306,7 +306,7 @@ class AbstractCacheClassificationLoss(CacheLoss, metaclass=abc.ABCMeta):
     """
 
     @abc.abstractmethod
-    def _retrieve_from_cache(self, query_embeddings, cache, return_topk):
+    def _retrieve_from_cache(self, query_embeddings, cache, return_topk=0):
         pass
 
     @abc.abstractmethod
@@ -319,7 +319,7 @@ class AbstractCacheClassificationLoss(CacheLoss, metaclass=abc.ABCMeta):
         query_embeddings,
         pos_doc_embeddings,
         cache,
-        return_topk,
+        return_topk=0,
         reducer=torch.mean,
     ):
         """Calculates the cache classification loss and associated summaries."""
@@ -423,7 +423,7 @@ class CacheClassificationLoss(AbstractCacheClassificationLoss):
         self.reducer = reducer
         self._retrieval_fn = retrieval_fns.GumbelMaxRetrievalFn()
 
-    def _retrieve_from_cache(self, query_embeddings, cache, return_topk):
+    def _retrieve_from_cache(self, query_embeddings, cache, return_topk=0):
         sorted_data_sources = sorted(cache.keys())
         return _retrieve_from_caches(
             query_embeddings,
@@ -443,7 +443,7 @@ class CacheClassificationLoss(AbstractCacheClassificationLoss):
         )
 
     def __call__(
-        self, doc_network, query_embeddings, pos_doc_embeddings, cache, return_topk
+        self, doc_network, query_embeddings, pos_doc_embeddings, cache, return_topk=0
     ):
         """Calculates the cache classification losses.
 
@@ -555,7 +555,7 @@ class DistributedCacheClassificationLoss(AbstractCacheClassificationLoss):
             query_embeddings, doc_embeddings, score_transform=self.score_transform
         )
 
-    def _retrieve_from_cache(self, query_embeddings, cache, return_topk):
+    def _retrieve_from_cache(self, query_embeddings, cache, return_topk=0):
         sorted_data_sources = sorted(cache.keys())
         all_query_embeddings = util.cross_replica_concat(query_embeddings)
         num_replicas = dist.get_world_size()
@@ -646,7 +646,7 @@ class DistributedCacheClassificationLoss(AbstractCacheClassificationLoss):
         )
 
     def __call__(
-        self, doc_network, query_embeddings, pos_doc_embeddings, cache, return_topk
+        self, doc_network, query_embeddings, pos_doc_embeddings, cache, return_topk=0
     ):
         loss_calculation_return = self._calculate_training_loss_and_summaries(
             doc_network,
