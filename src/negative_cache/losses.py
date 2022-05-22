@@ -34,19 +34,28 @@ CacheLossReturn = collections.namedtuple(
         "updated_item_indices",
         "updated_item_mask",
         "staleness",
+        "topk_features",
     ],
 )
 
 
 class CacheLoss(object, metaclass=abc.ABCMeta):
     @abc.abstractmethod
-    def __call__(self, doc_network, query_embeddings, pos_doc_embeddings, cache):
+    def __call__(
+        self, doc_network, query_embeddings, pos_doc_embeddings, cache, return_topk
+    ):
         pass
 
 
 _RetrievalReturn = collections.namedtuple(
     "_RetrievalReturn",
-    ["retrieved_data", "scores", "retrieved_indices", "retrieved_cache_embeddings"],
+    [
+        "retrieved_data",
+        "scores",
+        "retrieved_indices",
+        "retrieved_cache_embeddings",
+        "retrieved_cache_topk_features",
+    ],
 )
 
 
@@ -78,6 +87,7 @@ def _retrieve_from_caches(
     embedding_key,
     data_keys,
     sorted_data_sources,
+    return_topk,
     score_transform=None,
     top_k=None,
 ):
@@ -105,6 +115,8 @@ def _retrieve_from_caches(
         score_transform=score_transform,
         all_pairs=True,
     ).detach()
+
+    retrieved_topk_features = None
     if top_k:
         scores, top_k_indices = util.approximate_top_k_with_indices(scores, top_k)
         # scores, top_k_indices: [batch_size x top_k]
@@ -112,6 +124,44 @@ def _retrieve_from_caches(
         scores = (
             scores.detach()
         )  # scores are only used to identify the current 'best' negative documents in the cache
+
+        if return_topk > 1:
+            # this features are not gumbel-max sampled
+            n = min(return_topk, top_k_indices.shape[-1])
+            # first we need to find the indices of the n highest scores from the topk
+            # retrieved elements
+            _, top_n_scores_indices = torch.topk(scores, n)
+            idx = (
+                top_n_scores_indices.view(-1).unsqueeze(dim=1).detach().to(device)
+            )  # [B*n x 1]
+            batch = (
+                (
+                    torch.arange(top_n_scores_indices.shape[0])
+                    .unsqueeze(dim=-1)
+                    .tile(top_n_scores_indices.shape[-1])
+                    .view(-1)
+                    .unsqueeze(dim=-1)
+                )
+                .detach()
+                .to(device)
+            )  # [B*n x 1]
+            indices = torch.cat((batch, idx), dim=1).detach().to(device)  # [B*n x 2]
+            top_n_indices = (
+                util.gather_nd(top_k_indices, indices)
+                .view(top_k_indices.shape[0], -1)
+                .detach()
+            )  # [B x n]
+            retrieved_topk_features = [
+                {
+                    k: util.gather_nd(
+                        v.detach(),
+                        top_n_indices[b].unsqueeze(dim=1).to(torch.device("cpu")),
+                    ).detach()
+                    for k, v in all_data.items()
+                }
+                for b in range(top_n_indices.shape[0])
+            ]  # [B x {str: [n x feature_size]}]
+            del top_n_scores_indices, idx, batch, indices, top_n_indices
 
         retrieved_indices = retrieval_fn(scores)
         retrieved_indices = retrieved_indices.detach()
@@ -155,6 +205,11 @@ def _retrieve_from_caches(
     # function (the gumbel max retrieval fn)
     # each row in the tensor is for one query, since each query got one index retrieved
 
+    if top_k and return_topk == 1:
+        # more efficient than computing top-1 element twice
+        # this way the top element is samlpled by gumbel-max
+        retrieved_topk_features = [retrieved_data]
+
     retrieved_cache_embeddings = util.gather_nd(
         all_embeddings, retrieved_indices
     ).detach()
@@ -162,7 +217,11 @@ def _retrieve_from_caches(
     # the documents which scores had the highest gumbel max (with gaumbel value and inv_temp)
     del all_data
     return _RetrievalReturn(
-        retrieved_data, scores, retrieved_indices, retrieved_cache_embeddings
+        retrieved_data,
+        scores,
+        retrieved_indices,
+        retrieved_cache_embeddings,
+        retrieved_topk_features,
     )
 
 
@@ -233,6 +292,7 @@ _LossCalculationReturn = collections.namedtuple(
         "staleness",
         "retrieval_return",
         "retrieved_negative_embeddings",
+        "retrieved_topk_features",
     ],
 )
 
@@ -246,7 +306,7 @@ class AbstractCacheClassificationLoss(CacheLoss, metaclass=abc.ABCMeta):
     """
 
     @abc.abstractmethod
-    def _retrieve_from_cache(self, query_embeddings, cache):
+    def _retrieve_from_cache(self, query_embeddings, cache, return_topk):
         pass
 
     @abc.abstractmethod
@@ -259,11 +319,14 @@ class AbstractCacheClassificationLoss(CacheLoss, metaclass=abc.ABCMeta):
         query_embeddings,
         pos_doc_embeddings,
         cache,
+        return_topk,
         reducer=torch.mean,
     ):
         """Calculates the cache classification loss and associated summaries."""
         positive_scores = self._score_documents(query_embeddings, pos_doc_embeddings)
-        retrieval_return = self._retrieve_from_cache(query_embeddings, cache)
+        retrieval_return = self._retrieve_from_cache(
+            query_embeddings, cache, return_topk
+        )
 
         retrieved_negative_embeddings = doc_network(retrieval_return.retrieved_data)
 
@@ -298,6 +361,7 @@ class AbstractCacheClassificationLoss(CacheLoss, metaclass=abc.ABCMeta):
             staleness=staleness,
             retrieval_return=retrieval_return,
             retrieved_negative_embeddings=retrieved_negative_embeddings,
+            retrieved_topk_features=retrieval_return.retrieved_cache_topk_features,
         )
 
 
@@ -359,7 +423,7 @@ class CacheClassificationLoss(AbstractCacheClassificationLoss):
         self.reducer = reducer
         self._retrieval_fn = retrieval_fns.GumbelMaxRetrievalFn()
 
-    def _retrieve_from_cache(self, query_embeddings, cache):
+    def _retrieve_from_cache(self, query_embeddings, cache, return_topk):
         sorted_data_sources = sorted(cache.keys())
         return _retrieve_from_caches(
             query_embeddings,
@@ -368,6 +432,7 @@ class CacheClassificationLoss(AbstractCacheClassificationLoss):
             self.embedding_key,
             self.data_keys,
             sorted_data_sources,
+            return_topk,
             self.score_transform,
             self.top_k,
         )
@@ -377,7 +442,9 @@ class CacheClassificationLoss(AbstractCacheClassificationLoss):
             query_embeddings, doc_embeddings, score_transform=self.score_transform
         )
 
-    def __call__(self, doc_network, query_embeddings, pos_doc_embeddings, cache):
+    def __call__(
+        self, doc_network, query_embeddings, pos_doc_embeddings, cache, return_topk
+    ):
         """Calculates the cache classification losses.
 
         Args:
@@ -393,7 +460,12 @@ class CacheClassificationLoss(AbstractCacheClassificationLoss):
           recalculated.
         """
         loss_calculation_return = self._calculate_training_loss_and_summaries(
-            doc_network, query_embeddings, pos_doc_embeddings, cache, self.reducer
+            doc_network,
+            query_embeddings,
+            pos_doc_embeddings,
+            cache,
+            return_topk,
+            self.reducer,
         )
 
         training_loss = loss_calculation_return.training_loss
@@ -406,6 +478,7 @@ class CacheClassificationLoss(AbstractCacheClassificationLoss):
         retrieved_negative_embeddings = (
             loss_calculation_return.retrieved_negative_embeddings.detach()
         )
+        topk_features = retrieval_return.retrieved_cache_topk_features
 
         sorted_data_sources = sorted(cache.keys())
 
@@ -428,6 +501,7 @@ class CacheClassificationLoss(AbstractCacheClassificationLoss):
             updated_item_indices=updated_item_indices,
             updated_item_mask=updated_item_mask,
             staleness=staleness,
+            topk_features=topk_features,
         )
 
 
@@ -481,7 +555,7 @@ class DistributedCacheClassificationLoss(AbstractCacheClassificationLoss):
             query_embeddings, doc_embeddings, score_transform=self.score_transform
         )
 
-    def _retrieve_from_cache(self, query_embeddings, cache):
+    def _retrieve_from_cache(self, query_embeddings, cache, return_topk):
         sorted_data_sources = sorted(cache.keys())
         all_query_embeddings = util.cross_replica_concat(query_embeddings)
         num_replicas = dist.get_world_size()
@@ -497,6 +571,7 @@ class DistributedCacheClassificationLoss(AbstractCacheClassificationLoss):
             self.embedding_key,
             self.data_keys,
             sorted_data_sources,
+            return_topk,
             self.score_transform,
             top_k_per_replica,
         )
@@ -516,7 +591,6 @@ class DistributedCacheClassificationLoss(AbstractCacheClassificationLoss):
         local_queries_all_retrieved_embeddings = _get_local_elements_global_data(
             retrieval_return.retrieved_cache_embeddings, num_replicas
         )
-        del retrieval_return
         # We then sample a shard index proportional to its total weight.
         # This allows us to do Gumbel-Max sampling without modifying APIs.
         selected_replica = self._retrieval_fn(local_queries_global_weights)
@@ -529,6 +603,28 @@ class DistributedCacheClassificationLoss(AbstractCacheClassificationLoss):
             selected_replica_with_batch = (
                 torch.concat([batch_indices, selected_replica], dim=1).detach().cuda()
             )
+
+        # We retrieved topk / num_replica features per query per replica. We have to concatenate the
+        # retrieved features for the respective queries.
+        if return_topk:
+            retrieved_topk_features_global = []
+            for idx in range(
+                0, len(retrieval_return.retrieved_cache_topk_features), num_replicas
+            ):
+                new_dict = {}
+                topk_per_query = retrieval_return.retrieved_cache_topk_features[
+                    idx : idx + num_replicas
+                ]
+                for d in topk_per_query:
+                    for k, v in d.items():
+                        if k in new_dict:
+                            new_dict[k] = torch.vstack((new_dict[k], v))
+                        else:
+                            new_dict[k] = v
+                retrieved_topk_features_global.append(new_dict)
+        else:
+            retrieved_topk_features_global = None
+
         retrieved_data = {
             k: util.gather_nd(v, selected_replica_with_batch).detach()
             for k, v in local_queries_all_retrieved_data.items()
@@ -536,6 +632,7 @@ class DistributedCacheClassificationLoss(AbstractCacheClassificationLoss):
         retrieved_cache_embeddings = util.gather_nd(
             local_queries_all_retrieved_embeddings, selected_replica_with_batch
         ).detach()
+        del retrieval_return
         del all_queries_local_weight
         del local_queries_all_retrieved_data
         del local_queries_all_retrieved_embeddings
@@ -545,15 +642,24 @@ class DistributedCacheClassificationLoss(AbstractCacheClassificationLoss):
             scores=local_queries_global_weights,
             retrieved_indices=None,
             retrieved_cache_embeddings=retrieved_cache_embeddings,
+            retrieved_cache_topk_features=retrieved_topk_features_global,
         )
 
-    def __call__(self, doc_network, query_embeddings, pos_doc_embeddings, cache):
+    def __call__(
+        self, doc_network, query_embeddings, pos_doc_embeddings, cache, return_topk
+    ):
         loss_calculation_return = self._calculate_training_loss_and_summaries(
-            doc_network, query_embeddings, pos_doc_embeddings, cache, self.reducer
+            doc_network,
+            query_embeddings,
+            pos_doc_embeddings,
+            cache,
+            return_topk,
+            self.reducer,
         )
         training_loss = loss_calculation_return.training_loss
         interpretable_loss = loss_calculation_return.interpretable_loss
         staleness = loss_calculation_return.staleness
+        topk_features = loss_calculation_return.retrieved_topk_features
         del loss_calculation_return
         return CacheLossReturn(
             training_loss=training_loss,
@@ -562,4 +668,6 @@ class DistributedCacheClassificationLoss(AbstractCacheClassificationLoss):
             updated_item_indices={k: None for k in cache},
             updated_item_mask={k: None for k in cache},
             staleness=staleness,
+            topk_features=topk_features,
         )
+

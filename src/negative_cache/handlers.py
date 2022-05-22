@@ -117,6 +117,7 @@ class _MultiCacheLossHandler(torch.nn.Module):
         pos_item_embeddings,
         new_item_embeddings,
         new_item_features,
+        return_topk,
         writer=None,
     ):
         cache_loss_return = self.cache_loss(
@@ -124,6 +125,7 @@ class _MultiCacheLossHandler(torch.nn.Module):
             query_embeddings=query_embeddings,
             pos_doc_embeddings=pos_item_embeddings,
             cache=self.cache,
+            return_topk=return_topk,
         )
         if writer is not None:
             writer[0].add_scalar(
@@ -135,7 +137,11 @@ class _MultiCacheLossHandler(torch.nn.Module):
                 "cache/staleness", cache_loss_return.staleness, writer[1]
             )
         self._update_cache(new_item_embeddings, new_item_features, cache_loss_return)
-        return cache_loss_return.training_loss
+
+        if return_topk:
+            return cache_loss_return.training_loss, cache_loss_return.topk_features
+        else:
+            return cache_loss_return.training_loss
 
 
 class CacheLossHandler(torch.nn.Module):
@@ -189,6 +195,7 @@ class CacheLossHandler(torch.nn.Module):
         pos_item_embeddings,
         features,
         writer=None,
+        return_topk=0,
     ):
         """Calculate the loss and perform all cache updates.
 
@@ -201,16 +208,22 @@ class CacheLossHandler(torch.nn.Module):
             items.
           writer: Tuple with SummaryWriter and global_step used for logging of additional information, i.e.
             interpretable loss and staleness of the cache.
+          return_topk: Number of negatives returned from the topk retrieved negatives from the cache, 
+            per query. If return_topk > topk, only topk elements per query are returned. Must be >= 0.
+            Defaults to 0.
 
         Returns:
-          The training loss.
+          The training loss or (training loss, topk_features) if return_topk > 0. topk_features is 
+          a list of dictionaries for each query containing the specs necessary to compute the embeddings.
         """
+        assert return_topk >= 0
         return self._cache_loss_handler.update_cache_and_compute_loss(
             item_network,
             query_embeddings,
             pos_item_embeddings,
             new_item_embeddings={self._cache_key: pos_item_embeddings},
             new_item_features={self._cache_key: features},
+            return_topk=return_topk,
             writer=writer,
         )
 

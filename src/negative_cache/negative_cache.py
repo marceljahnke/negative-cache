@@ -61,9 +61,7 @@ class CacheManager(object):
     def _get_new_item_indices(self, age, updates, mask=None):
         any_update = list(updates.values())[0]
         num_updates = any_update.size()[0]
-        _, new_item_indices = torch.topk(
-            age, num_updates
-        )  # no rules for indices of duplicate values -> does not return the lowest indeces of duplicates like tf.math.top_k
+        _, new_item_indices = torch.topk(age, num_updates)
         del any_update
         del num_updates
         if mask is not None:
